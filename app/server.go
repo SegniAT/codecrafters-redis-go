@@ -4,25 +4,39 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 )
 
+const WORKERS = 15
+
 func main() {
-	l, err := net.Listen("tcp", "0.0.0.0:6379")
+	listener, err := net.Listen("tcp", "0.0.0.0:6379")
 	if err != nil {
 		fmt.Println("Failed to bind to port 6379")
 		os.Exit(1)
 	}
-	defer l.Close()
+	defer listener.Close()
+
+	var wg sync.WaitGroup
+	connsChan := make(chan net.Conn, 20)
+
+	for i := 0; i < WORKERS; i++ {
+		wg.Add(1)
+		go worker(&wg, connsChan)
+	}
 
 	for {
-		conn, err := l.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			fmt.Println("Error accepting connection: ", err.Error())
 			os.Exit(1)
 		}
 
-		handleConnection(conn)
+		go func() {
+			connsChan <- conn
+		}()
 	}
+
 }
 
 func handleConnection(conn net.Conn) {
@@ -40,4 +54,11 @@ func handleConnection(conn net.Conn) {
 		conn.Write([]byte("+PONG\r\n"))
 	}
 
+}
+
+func worker(wg *sync.WaitGroup, connChan chan net.Conn) {
+	defer wg.Done()
+	for conn := range connChan {
+		handleConnection(conn)
+	}
 }
