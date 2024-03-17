@@ -29,9 +29,12 @@ func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	buff := make([]byte, 1024)
-	conn.Read(buff)
+	for lenght, err := conn.Read(buff); lenght > 0; {
+		if err != nil {
+			fmt.Println("Failed to read from connection")
+			os.Exit(1)
+		}
+		conn.Write([]byte("+PONG\r\n"))
+	}
 
-	fmt.Println(buff)
-
-	conn.Write([]byte("+PONG\r\n"))
 }
