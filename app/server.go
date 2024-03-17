@@ -31,8 +31,9 @@ func handleConnection(conn net.Conn) {
 	buff := make([]byte, 20)
 	conn.Read(buff)
 
+	buffStr := string(buff)
 	switch {
-	case string(buff) == "*1\r\n$4\r\nping\r\n":
+	case buffStr == "*1\r\n$4\r\nping\r\n" || buffStr == "ping" || buffStr == "PING":
 		conn.Write([]byte("+PONG\r\n"))
 	}
 }
