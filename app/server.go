@@ -28,12 +28,10 @@ func main() {
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	buff := make([]byte, 20)
+	buff := make([]byte, 1024)
 	conn.Read(buff)
 
-	buffStr := string(buff)
-	switch {
-	case buffStr == "*1\r\n$4\r\nping\r\n" || buffStr == "ping" || buffStr == "PING":
-		conn.Write([]byte("+PONG\r\n"))
-	}
+	fmt.Println(buff)
+
+	conn.Write([]byte("+PONG\r\n"))
 }
