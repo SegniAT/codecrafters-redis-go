@@ -28,12 +28,15 @@ func main() {
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	buff := make([]byte, 1024)
-	for lenght, err := conn.Read(buff); lenght > 0; {
+	for {
+		buff := make([]byte, 30)
+
+		_, err := conn.Read(buff)
 		if err != nil {
 			fmt.Println("Failed to read from connection")
 			os.Exit(1)
 		}
+
 		conn.Write([]byte("+PONG\r\n"))
 	}
 
