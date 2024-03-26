@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
+
+	"github.com/codecrafters-io/redis-starter-go/RESP"
 )
 
 const WORKERS = 15
@@ -43,15 +46,39 @@ func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	for {
-		buff := make([]byte, 30)
+		respReader := resp.NewRes(conn)
+		respVal, err := respReader.Read()
 
-		_, err := conn.Read(buff)
 		if err != nil {
-			fmt.Println("Failed to read from connection")
-			os.Exit(1)
+			fmt.Println("Failed to read from connection: ", err)
+			break
 		}
 
-		conn.Write([]byte("+PONG\r\n"))
+		respMarhaller := resp.NewWriter(conn)
+
+		if respVal.Typ == resp.ARRAY {
+			arr := respVal.Array
+
+			if len(arr) < 1 {
+				return
+			}
+
+			command := strings.ToLower(string(arr[0].Bulk_str))
+			fmt.Println(command)
+			switch command {
+			case "echo":
+				var echoResp []byte
+				if len(arr) > 1 {
+					echoResp = arr[1].Bulk_str
+				}
+				respMarhaller.Write(resp.Value{Typ: resp.SIMPLE_STRING, Simple_str: echoResp})
+			case "ping":
+				respMarhaller.Write(resp.Value{Typ: resp.SIMPLE_STRING, Simple_str: []byte("PONG")})
+			default:
+				break
+			}
+		}
+
 	}
 
 }
