@@ -316,6 +316,7 @@ func (v Value) marshalBulkString() []byte {
 	var bytes []byte
 	bytes = append(bytes, byte(BULK_STRING))
 	bytes = append(bytes, strconv.Itoa(len(v.Bulk_str))...)
+	bytes = append(bytes, '\r', '\n')
 
 	bytes = append(bytes, v.Bulk_str...)
 	bytes = append(bytes, '\r', '\n')

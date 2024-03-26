@@ -45,6 +45,8 @@ func main() {
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
+	tempHash := make(map[string]string)
+
 	for {
 		respReader := resp.NewRes(conn)
 		respVal, err := respReader.Read()
@@ -74,6 +76,44 @@ func handleConnection(conn net.Conn) {
 				respMarhaller.Write(resp.Value{Typ: resp.SIMPLE_STRING, Simple_str: echoResp})
 			case "ping":
 				respMarhaller.Write(resp.Value{Typ: resp.SIMPLE_STRING, Simple_str: []byte("PONG")})
+			case "set":
+				if len(arr) != 3 {
+					respMarhaller.Write(resp.Value{
+						Typ:        resp.SIMPLE_ERROR,
+						Simple_err: []byte("wrong number of arguments"),
+					})
+				}
+				key := string(arr[1].Bulk_str)
+				val := string(arr[2].Bulk_str)
+
+				tempHash[key] = val
+				respMarhaller.Write(resp.Value{
+					Typ:        resp.SIMPLE_STRING,
+					Simple_str: []byte("OK"),
+				})
+				fmt.Println(tempHash)
+			case "get":
+				if len(arr) != 2 {
+					respMarhaller.Write(resp.Value{
+						Typ:        resp.SIMPLE_ERROR,
+						Simple_err: []byte("wrong number of arguments"),
+					})
+				}
+
+				key := string(arr[1].Bulk_str)
+				val, ok := tempHash[key]
+				if !ok {
+					respMarhaller.Write(resp.Value{
+						Typ:        resp.SIMPLE_ERROR,
+						Simple_err: []byte(fmt.Sprintf("value for key %s not found", key)),
+					})
+				}
+
+				respMarhaller.Write(resp.Value{
+					Typ:      resp.BULK_STRING,
+					Bulk_str: []byte(val),
+				})
+
 			default:
 				break
 			}
