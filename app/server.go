@@ -150,6 +150,23 @@ func handleConnection(conn net.Conn) {
 					Typ:      resp.BULK_STRING,
 					Bulk_str: []byte(val.Val),
 				})
+			case "info":
+				if len(arr) == 1 {
+
+					continue
+				}
+
+				param := string(arr[1].Bulk_str)
+
+				switch param {
+				case "replication":
+					respMarhaller.Write(resp.Value{
+						Typ:      resp.BULK_STRING,
+						Bulk_str: []byte("role:master"),
+					})
+				default:
+					continue
+				}
 
 			default:
 				break
