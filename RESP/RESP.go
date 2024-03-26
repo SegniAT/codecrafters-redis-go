@@ -361,6 +361,16 @@ func (v Value) marshalBoolean() []byte {
 	return bytes
 }
 
+// $-1\r\n
+func NullBulkString() []byte {
+	var bytes []byte
+	bytes = append(bytes, byte(BULK_STRING))
+	bytes = append(bytes, '-', '1')
+	bytes = append(bytes, '\r', '\n')
+
+	return bytes
+}
+
 type Writer struct {
 	writer io.Writer
 }

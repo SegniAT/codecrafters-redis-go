@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/codecrafters-io/redis-starter-go/RESP"
 )
@@ -45,7 +47,13 @@ func main() {
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	tempHash := make(map[string]string)
+	type StoreVal struct {
+		Val       string
+		StoreTime time.Time
+		Exp       int // ms
+	}
+
+	tempHash := make(map[string]StoreVal)
 
 	for {
 		respReader := resp.NewRes(conn)
@@ -77,14 +85,33 @@ func handleConnection(conn net.Conn) {
 			case "ping":
 				respMarhaller.Write(resp.Value{Typ: resp.SIMPLE_STRING, Simple_str: []byte("PONG")})
 			case "set":
-				if len(arr) != 3 {
+				if len(arr) < 3 {
 					respMarhaller.Write(resp.Value{
 						Typ:        resp.SIMPLE_ERROR,
 						Simple_err: []byte("wrong number of arguments"),
 					})
 				}
 				key := string(arr[1].Bulk_str)
-				val := string(arr[2].Bulk_str)
+
+				val := StoreVal{
+					Val:       string(arr[2].Bulk_str),
+					StoreTime: time.Now(),
+				}
+
+				if len(arr) >= 5 {
+					opt1 := string(arr[3].Bulk_str)
+					if strings.ToLower(opt1) == "px" {
+						expiry, err := strconv.Atoi(string(arr[4].Bulk_str))
+						if err != nil {
+							respMarhaller.Write(resp.Value{
+								Typ:        resp.SIMPLE_ERROR,
+								Simple_err: []byte("error trying to read expiry"),
+							})
+						}
+
+						val.Exp = expiry
+					}
+				}
 
 				tempHash[key] = val
 				respMarhaller.Write(resp.Value{
@@ -102,16 +129,22 @@ func handleConnection(conn net.Conn) {
 
 				key := string(arr[1].Bulk_str)
 				val, ok := tempHash[key]
+
+				if val.Exp != 0 && time.Since(val.StoreTime).Milliseconds() > int64(val.Exp) {
+					conn.Write(resp.NullBulkString())
+					continue
+				}
+
 				if !ok {
 					respMarhaller.Write(resp.Value{
-						Typ:        resp.SIMPLE_ERROR,
-						Simple_err: []byte(fmt.Sprintf("value for key %s not found", key)),
+						Typ:  resp.NULL,
+						Null: true,
 					})
 				}
 
 				respMarhaller.Write(resp.Value{
 					Typ:      resp.BULK_STRING,
-					Bulk_str: []byte(val),
+					Bulk_str: []byte(val.Val),
 				})
 
 			default:
