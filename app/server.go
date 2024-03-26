@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -15,7 +16,12 @@ import (
 const WORKERS = 15
 
 func main() {
-	listener, err := net.Listen("tcp", "0.0.0.0:6379")
+	PORT := flag.Int("port", 6379, "port number to expose the server to")
+	flag.Parse()
+
+	connStr := fmt.Sprintf("0.0.0.0:%v", *PORT)
+
+	listener, err := net.Listen("tcp", connStr)
 	if err != nil {
 		fmt.Println("Failed to bind to port 6379")
 		os.Exit(1)
@@ -74,7 +80,6 @@ func handleConnection(conn net.Conn) {
 			}
 
 			command := strings.ToLower(string(arr[0].Bulk_str))
-			fmt.Println(command)
 			switch command {
 			case "echo":
 				var echoResp []byte
@@ -118,7 +123,6 @@ func handleConnection(conn net.Conn) {
 					Typ:        resp.SIMPLE_STRING,
 					Simple_str: []byte("OK"),
 				})
-				fmt.Println(tempHash)
 			case "get":
 				if len(arr) != 2 {
 					respMarhaller.Write(resp.Value{
