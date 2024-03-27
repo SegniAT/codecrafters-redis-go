@@ -139,11 +139,15 @@ func handleConnection(conn net.Conn, app *App) {
 			case "info":
 				response := app.info(args)
 				respMarshaller.Write(response)
+			case "replconf":
+				respMarshaller.Write(resp.Value{
+					Typ:        resp.SIMPLE_STRING,
+					Simple_str: []byte("OK"),
+				})
 			default:
 				return
 			}
 		} else {
-			fmt.Println("what tha heeeell: ", respVal)
 		}
 
 	}
@@ -158,10 +162,12 @@ func connectToMaster(app *App) {
 		os.Exit(1)
 	}
 
+	respReader := resp.NewRes(conn)
+
 	// handshake with master
 	respMarshaller := resp.NewWriter(conn)
 
-	respMarshaller.Write(resp.Value{
+	err = respMarshaller.Write(resp.Value{
 		Typ: resp.ARRAY,
 		Array: []resp.Value{
 			{
@@ -170,6 +176,70 @@ func connectToMaster(app *App) {
 			},
 		},
 	})
+
+	if err != nil {
+		fmt.Println("handshake (1/3): ", err)
+		os.Exit(1)
+	}
+
+	responseVal, err := respReader.Read()
+	if err != nil {
+		fmt.Println("handshake (1/3): ", err)
+		os.Exit(1)
+	}
+
+	if responseVal.Typ != resp.SIMPLE_STRING && strings.ToLower(string(responseVal.Simple_str)) != "ok" {
+		fmt.Println("handshake (1/3): didn't recieve OK from master")
+		os.Exit(1)
+	}
+
+	err = respMarshaller.Write(
+		resp.Value{
+			Typ: resp.ARRAY,
+			Array: []resp.Value{
+				{
+					Typ:      resp.BULK_STRING,
+					Bulk_str: []byte("REPLCONF"),
+				},
+				{
+					Typ:      resp.BULK_STRING,
+					Bulk_str: []byte("listening-port"),
+				},
+				{
+					Typ:      resp.BULK_STRING,
+					Bulk_str: []byte(fmt.Sprintf("%d", app.cfg.port)),
+				},
+			},
+		})
+
+	if err != nil {
+		fmt.Println("handshake (2/3): ", err)
+		os.Exit(1)
+	}
+
+	err = respMarshaller.Write(
+		resp.Value{
+			Typ: resp.ARRAY,
+			Array: []resp.Value{
+				{
+					Typ:      resp.BULK_STRING,
+					Bulk_str: []byte("REPLCONF"),
+				},
+				{
+					Typ:      resp.BULK_STRING,
+					Bulk_str: []byte("capa"),
+				},
+				{
+					Typ:      resp.BULK_STRING,
+					Bulk_str: []byte("psync2"),
+				},
+			},
+		})
+
+	if err != nil {
+		fmt.Println("handshake (2/3): ", err)
+		os.Exit(1)
+	}
 
 	go handleConnection(conn, app)
 }
