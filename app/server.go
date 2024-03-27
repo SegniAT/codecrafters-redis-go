@@ -15,11 +15,33 @@ import (
 
 const WORKERS = 15
 
+type Config struct {
+	port       int
+	masterHost string
+	masterPort int
+}
+
 func main() {
-	PORT := flag.Int("port", 6379, "port number to expose the server to")
+	var cfg = Config{}
+	flag.IntVar(&cfg.port, "port", 6379, "Port number to expose the server to")
+	replicaOf := flag.String("replicaof", "", "Specify the master host and port in format: <MASTER_HOST> <MASTER_PORT>")
+
 	flag.Parse()
 
-	connStr := fmt.Sprintf("0.0.0.0:%v", *PORT)
+	if *replicaOf != "" {
+		noFlagArgs := flag.Args()
+
+		masterHost := *replicaOf
+		cfg.masterHost = masterHost
+		num, err := strconv.Atoi(noFlagArgs[0])
+		if err != nil {
+			panic(err)
+		}
+		cfg.masterPort = num
+
+	}
+
+	connStr := fmt.Sprintf("0.0.0.0:%v", cfg.port)
 
 	listener, err := net.Listen("tcp", connStr)
 	if err != nil {
@@ -33,7 +55,7 @@ func main() {
 
 	for i := 0; i < WORKERS; i++ {
 		wg.Add(1)
-		go worker(&wg, connsChan)
+		go worker(&wg, connsChan, &cfg)
 	}
 
 	for {
@@ -50,7 +72,7 @@ func main() {
 
 }
 
-func handleConnection(conn net.Conn) {
+func handleConnection(conn net.Conn, cfg *Config) {
 	defer conn.Close()
 
 	type StoreVal struct {
@@ -160,10 +182,19 @@ func handleConnection(conn net.Conn) {
 
 				switch param {
 				case "replication":
-					respMarhaller.Write(resp.Value{
-						Typ:      resp.BULK_STRING,
-						Bulk_str: []byte("role:master"),
-					})
+					// role
+					if cfg.masterHost == "" {
+						respMarhaller.Write(resp.Value{
+							Typ:      resp.BULK_STRING,
+							Bulk_str: []byte("role:master"),
+						})
+					} else {
+						respMarhaller.Write(resp.Value{
+							Typ:      resp.BULK_STRING,
+							Bulk_str: []byte("role:slave"),
+						})
+					}
+
 				default:
 					continue
 				}
@@ -177,9 +208,9 @@ func handleConnection(conn net.Conn) {
 
 }
 
-func worker(wg *sync.WaitGroup, connChan chan net.Conn) {
+func worker(wg *sync.WaitGroup, connChan chan net.Conn, cfg *Config) {
 	defer wg.Done()
 	for conn := range connChan {
-		handleConnection(conn)
+		handleConnection(conn, cfg)
 	}
 }
