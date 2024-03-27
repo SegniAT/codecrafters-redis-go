@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"math/rand"
 	"net"
 	"os"
 	"strconv"
@@ -14,7 +13,11 @@ import (
 	"github.com/codecrafters-io/redis-starter-go/RESP"
 )
 
-const WORKERS = 15
+type StoreVal struct {
+	Val       string
+	StoreTime time.Time
+	Exp       int // ms
+}
 
 type Config struct {
 	port             int
@@ -24,83 +27,92 @@ type Config struct {
 	masterReplOffset int
 }
 
-const alphanumeric = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+type App struct {
+	isMaster bool
+	cfg      Config
+	handlers map[string]func([]resp.Value) resp.Value
+	store    map[string]StoreVal
+
+	mut sync.Mutex
+}
 
 func main() {
-	var cfg = Config{}
+	var cfg Config
+
 	flag.IntVar(&cfg.port, "port", 6379, "Port number to expose the server to")
 	replicaOf := flag.String("replicaof", "", "Specify the master host and port in format: <MASTER_HOST> <MASTER_PORT>")
 
 	flag.Parse()
 
-	if *replicaOf != "" {
-		noFlagArgs := flag.Args()
+	app := &App{
+		isMaster: *replicaOf == "",
+		cfg:      cfg,
+		handlers: Handlers,
+		store:    make(map[string]StoreVal),
 
-		masterHost := *replicaOf
-		cfg.masterHost = masterHost
-		num, err := strconv.Atoi(noFlagArgs[0])
-		if err != nil {
-			panic(err)
+		mut: sync.Mutex{},
+	}
+
+	if !app.isMaster {
+		argsLen := len(os.Args)
+		for ind, arg := range os.Args {
+			if arg == "--replicaof" {
+				if ind+2 >= argsLen {
+					fmt.Println("not enough arguments for --replicaof: <MASTER_HOST> <MASTER_PORT>")
+					os.Exit(1)
+				}
+				app.cfg.masterHost = os.Args[ind+1]
+				num, err := strconv.Atoi(os.Args[ind+2])
+				if err != nil {
+					fmt.Println(err)
+					os.Exit(1)
+				}
+				app.cfg.masterPort = num
+			}
 		}
-		cfg.masterPort = num
 
 	}
 
-	cfg.masterReplId = RandString(40)
-	cfg.masterReplOffset = 0
+	app.cfg.masterReplId = RandString(40)
+	app.cfg.masterReplOffset = 0
+
+	if !app.isMaster {
+		connectToMaster(app)
+	}
 
 	connStr := fmt.Sprintf("0.0.0.0:%v", cfg.port)
-
 	listener, err := net.Listen("tcp", connStr)
-	if err != nil {
-		fmt.Println("Failed to bind to port 6379")
-		os.Exit(1)
-	}
 	defer listener.Close()
-
-	var wg sync.WaitGroup
-	connsChan := make(chan net.Conn, 20)
-
-	for i := 0; i < WORKERS; i++ {
-		wg.Add(1)
-		go worker(&wg, connsChan, &cfg)
+	if err != nil {
+		fmt.Println("Failed to bind to port: ", cfg.port)
+		os.Exit(1)
 	}
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			fmt.Println("Error accepting connection: ", err.Error())
-			os.Exit(1)
+			continue
 		}
 
-		go func() {
-			connsChan <- conn
-		}()
+		go handleConnection(conn, app)
 	}
 
 }
 
-func handleConnection(conn net.Conn, cfg *Config) {
+func handleConnection(conn net.Conn, app *App) {
 	defer conn.Close()
 
-	type StoreVal struct {
-		Val       string
-		StoreTime time.Time
-		Exp       int // ms
-	}
-
-	tempHash := make(map[string]StoreVal)
+	respReader := resp.NewRes(conn)
+	respMarshaller := resp.NewWriter(conn)
 
 	for {
-		respReader := resp.NewRes(conn)
 		respVal, err := respReader.Read()
 
 		if err != nil {
 			fmt.Println("Failed to read from connection: ", err)
-			break
+			return
 		}
-
-		respMarhaller := resp.NewWriter(conn)
 
 		if respVal.Typ == resp.ARRAY {
 			arr := respVal.Array
@@ -110,133 +122,54 @@ func handleConnection(conn net.Conn, cfg *Config) {
 			}
 
 			command := strings.ToLower(string(arr[0].Bulk_str))
+			args := arr[1:]
 			switch command {
 			case "echo":
-				var echoResp []byte
-				if len(arr) > 1 {
-					echoResp = arr[1].Bulk_str
-				}
-				respMarhaller.Write(resp.Value{Typ: resp.SIMPLE_STRING, Simple_str: echoResp})
+				response := app.echo(args)
+				respMarshaller.Write(response)
 			case "ping":
-				respMarhaller.Write(resp.Value{Typ: resp.SIMPLE_STRING, Simple_str: []byte("PONG")})
+				response := app.ping(args)
+				respMarshaller.Write(response)
 			case "set":
-				if len(arr) < 3 {
-					respMarhaller.Write(resp.Value{
-						Typ:        resp.SIMPLE_ERROR,
-						Simple_err: []byte("wrong number of arguments"),
-					})
-				}
-				key := string(arr[1].Bulk_str)
-
-				val := StoreVal{
-					Val:       string(arr[2].Bulk_str),
-					StoreTime: time.Now(),
-				}
-
-				if len(arr) >= 5 {
-					opt1 := string(arr[3].Bulk_str)
-					if strings.ToLower(opt1) == "px" {
-						expiry, err := strconv.Atoi(string(arr[4].Bulk_str))
-						if err != nil {
-							respMarhaller.Write(resp.Value{
-								Typ:        resp.SIMPLE_ERROR,
-								Simple_err: []byte("error trying to read expiry"),
-							})
-						}
-
-						val.Exp = expiry
-					}
-				}
-
-				tempHash[key] = val
-				respMarhaller.Write(resp.Value{
-					Typ:        resp.SIMPLE_STRING,
-					Simple_str: []byte("OK"),
-				})
+				response := app.set(args)
+				respMarshaller.Write(response)
 			case "get":
-				if len(arr) != 2 {
-					respMarhaller.Write(resp.Value{
-						Typ:        resp.SIMPLE_ERROR,
-						Simple_err: []byte("wrong number of arguments"),
-					})
-				}
-
-				key := string(arr[1].Bulk_str)
-				val, ok := tempHash[key]
-
-				if val.Exp != 0 && time.Since(val.StoreTime).Milliseconds() > int64(val.Exp) {
-					conn.Write(resp.NullBulkString())
-					continue
-				}
-
-				if !ok {
-					respMarhaller.Write(resp.Value{
-						Typ:  resp.NULL,
-						Null: true,
-					})
-				}
-
-				respMarhaller.Write(resp.Value{
-					Typ:      resp.BULK_STRING,
-					Bulk_str: []byte(val.Val),
-				})
+				response := app.get(args)
+				respMarshaller.Write(response)
 			case "info":
-				if len(arr) == 1 {
-
-					continue
-				}
-
-				param := string(arr[1].Bulk_str)
-
-				switch param {
-				case "replication":
-					// role
-					bulkString := ""
-					if cfg.masterHost == "" {
-						bulkString = fmt.Sprintf("%s%s", bulkString, "role:master")
-					} else {
-						bulkString = fmt.Sprintf("%s%s", bulkString, "role:slave")
-					}
-
-					masterReplIdStr := fmt.Sprintf("master_replid:%s", cfg.masterReplId)
-					masterReplOffsetStr := fmt.Sprintf("master_repl_offset:%d", cfg.masterReplOffset)
-
-					bulkString = fmt.Sprintf("%s %s", bulkString, masterReplIdStr)
-					bulkString = fmt.Sprintf("%s %s", bulkString, masterReplOffsetStr)
-
-					respMarhaller.Write(
-						resp.Value{
-							Typ:      resp.BULK_STRING,
-							Bulk_str: []byte(bulkString),
-						})
-
-				default:
-					continue
-				}
-
+				response := app.info(args)
+				respMarshaller.Write(response)
 			default:
-				break
+				return
 			}
+		} else {
+			fmt.Println("what tha heeeell: ", respVal)
 		}
 
 	}
 
 }
 
-func worker(wg *sync.WaitGroup, connChan chan net.Conn, cfg *Config) {
-	defer wg.Done()
-	for conn := range connChan {
-		handleConnection(conn, cfg)
-	}
-}
-
-func RandString(n int) string {
-	b := make([]byte, n)
-	source := rand.NewSource(time.Now().UnixNano())
-	rng := rand.New(source)
-	for i := range b {
-		b[i] = alphanumeric[rng.Intn(len(alphanumeric))]
+func connectToMaster(app *App) {
+	connStr := fmt.Sprintf("%s:%v", app.cfg.masterHost, app.cfg.masterPort)
+	conn, err := net.Dial("tcp", connStr)
+	if err != nil {
+		fmt.Println("Failed to connect to master: ", connStr)
+		os.Exit(1)
 	}
 
-	return string(b)
+	// handshake with master
+	respMarshaller := resp.NewWriter(conn)
+
+	respMarshaller.Write(resp.Value{
+		Typ: resp.ARRAY,
+		Array: []resp.Value{
+			{
+				Typ:      resp.BULK_STRING,
+				Bulk_str: []byte("ping"),
+			},
+		},
+	})
+
+	go handleConnection(conn, app)
 }

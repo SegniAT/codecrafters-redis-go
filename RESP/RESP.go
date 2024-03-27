@@ -55,15 +55,16 @@ func (t Type) String() string {
 }
 
 type Value struct {
-	Typ        Type
-	Simple_str []byte
-	Simple_err []byte
-	Integer    int64
-	Num        int
-	Bulk_str   []byte
-	Array      []Value
-	Null       bool
-	Boolean    bool
+	Typ          Type
+	Simple_str   []byte
+	Simple_err   []byte
+	Integer      int64
+	Num          int
+	Bulk_str     []byte
+	Bulk_str_err bool
+	Array        []Value
+	Null         bool
+	Boolean      bool
 }
 
 type Resp struct {
@@ -313,7 +314,16 @@ func (v Value) marshalInteger() []byte {
 
 // $<length>\r\n<data>\r\n
 func (v Value) marshalBulkString() []byte {
+
+	// $-1\r\n
 	var bytes []byte
+	if v.Bulk_str_err {
+		bytes = append(bytes, byte(BULK_STRING))
+		bytes = append(bytes, '-', '1')
+		bytes = append(bytes, '\r', '\n')
+		return bytes
+	}
+
 	bytes = append(bytes, byte(BULK_STRING))
 	bytes = append(bytes, strconv.Itoa(len(v.Bulk_str))...)
 	bytes = append(bytes, '\r', '\n')
@@ -356,16 +366,6 @@ func (v Value) marshalBoolean() []byte {
 	} else {
 		bytes = append(bytes, 'f')
 	}
-	bytes = append(bytes, '\r', '\n')
-
-	return bytes
-}
-
-// $-1\r\n
-func NullBulkString() []byte {
-	var bytes []byte
-	bytes = append(bytes, byte(BULK_STRING))
-	bytes = append(bytes, '-', '1')
 	bytes = append(bytes, '\r', '\n')
 
 	return bytes
