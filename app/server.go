@@ -164,9 +164,9 @@ func connectToMaster(app *App) {
 
 	respReader := resp.NewRes(conn)
 
-	// handshake with master
 	respMarshaller := resp.NewWriter(conn)
 
+	// handshake 1/3
 	err = respMarshaller.Write(resp.Value{
 		Typ: resp.ARRAY,
 		Array: []resp.Value{
@@ -193,6 +193,7 @@ func connectToMaster(app *App) {
 		os.Exit(1)
 	}
 
+	// handshake 2/3
 	err = respMarshaller.Write(
 		resp.Value{
 			Typ: resp.ARRAY,
@@ -212,6 +213,12 @@ func connectToMaster(app *App) {
 			},
 		})
 
+	if err != nil {
+		fmt.Println("handshake (2/3): ", err)
+		os.Exit(1)
+	}
+
+	responseVal, err = respReader.Read()
 	if err != nil {
 		fmt.Println("handshake (2/3): ", err)
 		os.Exit(1)
@@ -240,6 +247,37 @@ func connectToMaster(app *App) {
 		fmt.Println("handshake (2/3): ", err)
 		os.Exit(1)
 	}
+
+	responseVal, err = respReader.Read()
+	if err != nil {
+		fmt.Println("handshake (2/3): ", err)
+		os.Exit(1)
+	}
+
+	if responseVal.Typ != resp.SIMPLE_STRING && strings.ToLower(string(responseVal.Simple_str)) != "ok" {
+		fmt.Println("handshake (2/3): didn't recieve OK from master")
+		os.Exit(1)
+	}
+
+	// handshake 3/3
+	err = respMarshaller.Write(
+		resp.Value{
+			Typ: resp.ARRAY,
+			Array: []resp.Value{
+				{
+					Typ:      resp.BULK_STRING,
+					Bulk_str: []byte("PSYNC"),
+				},
+				{
+					Typ:      resp.BULK_STRING,
+					Bulk_str: []byte("?"),
+				},
+				{
+					Typ:      resp.BULK_STRING,
+					Bulk_str: []byte("-1"),
+				},
+			},
+		})
 
 	go handleConnection(conn, app)
 }
