@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"strconv"
@@ -16,10 +17,14 @@ import (
 const WORKERS = 15
 
 type Config struct {
-	port       int
-	masterHost string
-	masterPort int
+	port             int
+	masterHost       string
+	masterPort       int
+	masterReplId     string
+	masterReplOffset int
 }
+
+const alphanumeric = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 func main() {
 	var cfg = Config{}
@@ -40,6 +45,9 @@ func main() {
 		cfg.masterPort = num
 
 	}
+
+	cfg.masterReplId = RandString(40)
+	cfg.masterReplOffset = 0
 
 	connStr := fmt.Sprintf("0.0.0.0:%v", cfg.port)
 
@@ -183,17 +191,24 @@ func handleConnection(conn net.Conn, cfg *Config) {
 				switch param {
 				case "replication":
 					// role
+					bulkString := ""
 					if cfg.masterHost == "" {
-						respMarhaller.Write(resp.Value{
-							Typ:      resp.BULK_STRING,
-							Bulk_str: []byte("role:master"),
-						})
+						bulkString = fmt.Sprintf("%s%s", bulkString, "role:master")
 					} else {
-						respMarhaller.Write(resp.Value{
-							Typ:      resp.BULK_STRING,
-							Bulk_str: []byte("role:slave"),
-						})
+						bulkString = fmt.Sprintf("%s%s", bulkString, "role:slave")
 					}
+
+					masterReplIdStr := fmt.Sprintf("master_replid:%s", cfg.masterReplId)
+					masterReplOffsetStr := fmt.Sprintf("master_repl_offset:%d", cfg.masterReplOffset)
+
+					bulkString = fmt.Sprintf("%s %s", bulkString, masterReplIdStr)
+					bulkString = fmt.Sprintf("%s %s", bulkString, masterReplOffsetStr)
+
+					respMarhaller.Write(
+						resp.Value{
+							Typ:      resp.BULK_STRING,
+							Bulk_str: []byte(bulkString),
+						})
 
 				default:
 					continue
@@ -213,4 +228,15 @@ func worker(wg *sync.WaitGroup, connChan chan net.Conn, cfg *Config) {
 	for conn := range connChan {
 		handleConnection(conn, cfg)
 	}
+}
+
+func RandString(n int) string {
+	b := make([]byte, n)
+	source := rand.NewSource(time.Now().UnixNano())
+	rng := rand.New(source)
+	for i := range b {
+		b[i] = alphanumeric[rng.Intn(len(alphanumeric))]
+	}
+
+	return string(b)
 }
