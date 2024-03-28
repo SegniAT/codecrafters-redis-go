@@ -138,3 +138,10 @@ func (app *App) info(args []resp.Value) resp.Value {
 	}
 
 }
+
+func (app *App) psync(args []resp.Value) resp.Value {
+	return resp.Value{
+		Typ:        resp.SIMPLE_STRING,
+		Simple_str: []byte(fmt.Sprintf("FULLRESYNC %s %d", app.cfg.masterReplId, app.cfg.masterReplOffset)),
+	}
+}

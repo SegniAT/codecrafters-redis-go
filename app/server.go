@@ -144,6 +144,9 @@ func handleConnection(conn net.Conn, app *App) {
 					Typ:        resp.SIMPLE_STRING,
 					Simple_str: []byte("OK"),
 				})
+			case "psync":
+				response := app.psync(args)
+				respMarshaller.Write(response)
 			default:
 				return
 			}
