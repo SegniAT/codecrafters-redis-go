@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -140,8 +141,32 @@ func (app *App) info(args []resp.Value) resp.Value {
 }
 
 func (app *App) psync(args []resp.Value) resp.Value {
+	if len(args) < 2 {
+		return resp.Value{}
+	}
+
+	if string(args[0].Bulk_str) == "?" && string(args[1].Bulk_str) == "-1" {
+		return resp.Value{
+			Typ:        resp.SIMPLE_STRING,
+			Simple_str: []byte(fmt.Sprintf("FULLRESYNC %s %d", app.cfg.masterReplId, app.cfg.masterReplOffset)),
+		}
+	}
+
+	return resp.Value{}
+}
+
+func (app *App) emptyRdb(_ []resp.Value) resp.Value {
+	emptyRdbHex := "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2"
+	binaryData, err := hex.DecodeString(emptyRdbHex)
+	if err != nil {
+		fmt.Println("error decoding empty RDB hex value: ", emptyRdbHex)
+		fmt.Println(err)
+		return resp.Value{}
+	}
+
 	return resp.Value{
-		Typ:        resp.SIMPLE_STRING,
-		Simple_str: []byte(fmt.Sprintf("FULLRESYNC %s %d", app.cfg.masterReplId, app.cfg.masterReplOffset)),
+		Typ:          resp.BULK_STRING,
+		Bulk_str_rdb: true,
+		Bulk_str:     binaryData,
 	}
 }

@@ -147,6 +147,11 @@ func handleConnection(conn net.Conn, app *App) {
 			case "psync":
 				response := app.psync(args)
 				respMarshaller.Write(response)
+
+				// send empty rdb
+				response = app.emptyRdb(args)
+				respMarshaller.Write(response)
+
 			default:
 				return
 			}

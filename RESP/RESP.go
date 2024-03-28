@@ -62,6 +62,7 @@ type Value struct {
 	Num          int
 	Bulk_str     []byte
 	Bulk_str_err bool
+	Bulk_str_rdb bool
 	Array        []Value
 	Null         bool
 	Boolean      bool
@@ -329,7 +330,9 @@ func (v Value) marshalBulkString() []byte {
 	bytes = append(bytes, '\r', '\n')
 
 	bytes = append(bytes, v.Bulk_str...)
-	bytes = append(bytes, '\r', '\n')
+	if !v.Bulk_str_rdb {
+		bytes = append(bytes, '\r', '\n')
+	}
 
 	return bytes
 }
