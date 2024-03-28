@@ -64,7 +64,10 @@ func (app *App) set(args []resp.Value) resp.Value {
 		}
 	}
 
+	app.mut.Lock()
 	app.store[key] = val
+	app.mut.Unlock()
+
 	return resp.Value{
 		Typ:        resp.SIMPLE_STRING,
 		Simple_str: []byte("OK"),

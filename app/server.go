@@ -13,6 +13,13 @@ import (
 	"github.com/codecrafters-io/redis-starter-go/RESP"
 )
 
+type Replica struct {
+	listeningPort int
+	conn          net.Conn
+	capabilities  []string
+	acceptedRDB   bool
+}
+
 type StoreVal struct {
 	Val       string
 	StoreTime time.Time
@@ -32,6 +39,7 @@ type App struct {
 	cfg      Config
 	handlers map[string]func([]resp.Value) resp.Value
 	store    map[string]StoreVal
+	replicas map[string]Replica // "host:sentPort":Replica
 
 	mut sync.Mutex
 }
@@ -49,6 +57,7 @@ func main() {
 		cfg:      cfg,
 		handlers: Handlers,
 		store:    make(map[string]StoreVal),
+		replicas: make(map[string]Replica),
 
 		mut: sync.Mutex{},
 	}
@@ -133,6 +142,17 @@ func handleConnection(conn net.Conn, app *App) {
 			case "set":
 				response := app.set(args)
 				respMarshaller.Write(response)
+
+				if app.isMaster && len(app.replicas) > 0 {
+					err := app.propogate(respVal)
+
+					if err != nil {
+						fmt.Println("failed to propogate to all replicas")
+						fmt.Println(err)
+						continue
+					}
+				}
+
 			case "get":
 				response := app.get(args)
 				respMarshaller.Write(response)
@@ -140,6 +160,40 @@ func handleConnection(conn net.Conn, app *App) {
 				response := app.info(args)
 				respMarshaller.Write(response)
 			case "replconf":
+				if len(args) < 2 {
+					respMarshaller.Write(resp.Value{
+						Typ:        resp.SIMPLE_ERROR,
+						Simple_err: []byte("insufficient arguments"),
+					})
+				}
+
+				if string(args[0].Bulk_str) == "listening-port" {
+					portStr := string(args[1].Bulk_str)
+					port, err := strconv.Atoi(portStr)
+					if err != nil {
+						fmt.Println("error converting replconf listening_port to integer", err)
+						continue
+					}
+
+					remoteAddr := conn.RemoteAddr().String()
+
+					replica := Replica{
+						listeningPort: port,
+					}
+
+					app.mut.Lock()
+					app.replicas[remoteAddr] = replica
+					app.mut.Unlock()
+				}
+
+				if string(args[0].Bulk_str) == "capa" {
+					capability := string(args[1].Bulk_str)
+					app.mut.Lock()
+					replica := app.replicas[conn.RemoteAddr().String()]
+					app.mut.Unlock()
+					replica.capabilities = append(replica.capabilities, capability)
+				}
+
 				respMarshaller.Write(resp.Value{
 					Typ:        resp.SIMPLE_STRING,
 					Simple_str: []byte("OK"),
@@ -150,8 +204,20 @@ func handleConnection(conn net.Conn, app *App) {
 
 				// send empty rdb
 				response = app.emptyRdb(args)
-				respMarshaller.Write(response)
+				err := respMarshaller.Write(response)
+				if err != nil {
+					fmt.Println("Error sending empty RDB file to replica")
+					continue
+				}
 
+				remoteAddr := conn.RemoteAddr().String()
+
+				app.mut.Lock()
+				replica := app.replicas[remoteAddr]
+				replica.acceptedRDB = true
+				replica.conn = conn
+				app.replicas[remoteAddr] = replica
+				app.mut.Unlock()
 			default:
 				return
 			}
@@ -287,4 +353,36 @@ func connectToMaster(app *App) {
 		})
 
 	go handleConnection(conn, app)
+}
+
+func (app *App) initReplConns(conn net.Conn) error {
+	var mut sync.Mutex
+	var err error
+
+	for _, repl := range app.replicas {
+		go func(repl Replica) {
+			mut.Lock()
+			repl.conn = conn
+			mut.Unlock()
+		}(repl)
+	}
+
+	return err
+}
+
+func (app *App) propogate(response resp.Value) error {
+	var err error
+
+	for _, repl := range app.replicas {
+		if repl.conn == nil {
+			continue
+		}
+		go func(conn net.Conn) {
+			respWriter := resp.NewWriter(conn)
+			err = respWriter.Write(response)
+
+		}(repl.conn)
+	}
+
+	return err
 }
