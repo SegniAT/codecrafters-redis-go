@@ -355,21 +355,6 @@ func connectToMaster(app *App) {
 	go handleConnection(conn, app)
 }
 
-func (app *App) initReplConns(conn net.Conn) error {
-	var mut sync.Mutex
-	var err error
-
-	for _, repl := range app.replicas {
-		go func(repl Replica) {
-			mut.Lock()
-			repl.conn = conn
-			mut.Unlock()
-		}(repl)
-	}
-
-	return err
-}
-
 func (app *App) propogate(response resp.Value) error {
 	var err error
 
