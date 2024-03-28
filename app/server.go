@@ -163,7 +163,6 @@ func connectToMaster(app *App) {
 	}
 
 	respReader := resp.NewRes(conn)
-
 	respMarshaller := resp.NewWriter(conn)
 
 	// handshake 1/3
