@@ -150,7 +150,6 @@ func handleConnection(conn net.Conn, app *App) {
 				response := app.ping(args)
 				respMarshaller.Write(response)
 			case "set":
-				fmt.Println("set: ", string(arr[1].Bulk_str), time.Now())
 				app.commands <- Command{
 					command:    "set",
 					args:       arr,
@@ -158,7 +157,6 @@ func handleConnection(conn net.Conn, app *App) {
 				}
 
 			case "get":
-				fmt.Println("get: ", string(arr[1].Bulk_str), time.Now())
 				app.commands <- Command{
 					command:    "get",
 					args:       arr,
