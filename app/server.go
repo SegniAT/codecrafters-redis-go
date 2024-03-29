@@ -13,6 +13,12 @@ import (
 	"github.com/codecrafters-io/redis-starter-go/RESP"
 )
 
+type Command struct {
+	command    string
+	args       []resp.Value
+	marshaller resp.Writer
+}
+
 type Replica struct {
 	listeningPort int
 	conn          net.Conn
@@ -40,6 +46,7 @@ type App struct {
 	handlers map[string]func([]resp.Value) resp.Value
 	store    map[string]StoreVal
 	replicas map[string]Replica // "host:sentPort":Replica
+	commands chan Command
 
 	mut sync.Mutex
 }
@@ -58,6 +65,7 @@ func main() {
 		handlers: Handlers,
 		store:    make(map[string]StoreVal),
 		replicas: make(map[string]Replica),
+		commands: make(chan Command),
 
 		mut: sync.Mutex{},
 	}
@@ -96,6 +104,8 @@ func main() {
 		fmt.Println("Failed to bind to port: ", cfg.port)
 		os.Exit(1)
 	}
+
+	go app.handleCommands()
 
 	for {
 		conn, err := listener.Accept()
@@ -140,22 +150,20 @@ func handleConnection(conn net.Conn, app *App) {
 				response := app.ping(args)
 				respMarshaller.Write(response)
 			case "set":
-				response := app.set(args)
-				respMarshaller.Write(response)
-
-				if app.isMaster && len(app.replicas) > 0 {
-					err := app.propogate(respVal)
-
-					if err != nil {
-						fmt.Println("failed to propogate to all replicas")
-						fmt.Println(err)
-						continue
-					}
+				fmt.Println("set: ", string(arr[1].Bulk_str), time.Now())
+				app.commands <- Command{
+					command:    "set",
+					args:       arr,
+					marshaller: *respMarshaller,
 				}
 
 			case "get":
-				response := app.get(args)
-				respMarshaller.Write(response)
+				fmt.Println("get: ", string(arr[1].Bulk_str), time.Now())
+				app.commands <- Command{
+					command:    "get",
+					args:       arr,
+					marshaller: *respMarshaller,
+				}
 			case "info":
 				response := app.info(args)
 				respMarshaller.Write(response)
@@ -352,6 +360,18 @@ func connectToMaster(app *App) {
 			},
 		})
 
+	if err != nil {
+		fmt.Println("handshake (3/3) couldn't write to master: ", err)
+		os.Exit(1)
+	}
+
+	// read the rdb file sent from master
+	responseVal, err = respReader.Read()
+	if err != nil {
+		fmt.Println("handshake(3/3) error recieving RDB file from master: error ", err)
+		os.Exit(1)
+	}
+
 	go handleConnection(conn, app)
 }
 
@@ -370,4 +390,34 @@ func (app *App) propogate(response resp.Value) error {
 	}
 
 	return err
+}
+
+func (app *App) handleCommands() {
+	for command := range app.commands {
+		marshaller := command.marshaller
+
+		switch command.command {
+		case "get":
+			respVal := app.get(command.args[1:])
+			marshaller.Write(respVal)
+		case "set":
+			respVal := app.set(command.args[1:])
+			marshaller.Write(respVal)
+
+			if app.isMaster && len(app.replicas) > 0 {
+
+				err := app.propogate(resp.Value{
+					Typ:   resp.ARRAY,
+					Array: command.args,
+				})
+
+				if err != nil {
+					fmt.Println("failed to propogate to all replicas")
+					fmt.Println(err)
+				}
+			}
+		default:
+
+		}
+	}
 }

@@ -83,7 +83,10 @@ func (app *App) get(args []resp.Value) resp.Value {
 	}
 
 	key := string(args[0].Bulk_str)
+
+	app.mut.Lock()
 	val, ok := app.store[key]
+	app.mut.Unlock()
 
 	if !ok {
 		return resp.Value{
