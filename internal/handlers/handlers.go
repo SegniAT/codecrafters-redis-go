@@ -189,7 +189,6 @@ func info(args []resp.Value, cfg config.Config) resp.Value {
 
 	switch param {
 	case REPLICATION:
-		// role
 		bulkString := ""
 		if cfg.MasterHost == "" {
 			bulkString = fmt.Sprintf("%s%s", bulkString, "role:master")
