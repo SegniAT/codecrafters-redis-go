@@ -8,53 +8,33 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/codecrafters-io/redis-starter-go/RESP"
+	"github.com/codecrafters-io/redis-starter-go/internal/RESP"
+	"github.com/codecrafters-io/redis-starter-go/internal/config"
+	"github.com/codecrafters-io/redis-starter-go/internal/handlers"
+	"github.com/codecrafters-io/redis-starter-go/internal/replica"
+	"github.com/codecrafters-io/redis-starter-go/internal/store"
 )
 
 type Command struct {
-	command    string
-	args       []resp.Value
-	marshaller resp.Writer
+	command      string
+	args         []resp.Value
+	marshaller   resp.Writer
+	connToMaster bool
 }
-
-type Replica struct {
-	listeningPort int
-	conn          net.Conn
-	capabilities  []string
-	acceptedRDB   bool
-}
-
-type StoreVal struct {
-	Val       string
-	StoreTime time.Time
-	Exp       int // ms
-}
-
-type Config struct {
-	port             int
-	masterHost       string
-	masterPort       int
-	masterReplId     string
-	masterReplOffset int
-}
-
 type App struct {
 	isMaster bool
-	cfg      Config
-	handlers map[string]func([]resp.Value) resp.Value
-	store    map[string]StoreVal
-	replicas map[string]Replica // "host:sentPort":Replica
-	commands chan Command
+	cfg      config.Config
+	store    *store.Store
+	replicas map[string]replica.Replica // "host:sentPort":Replica
 
-	mut sync.Mutex
+	mut sync.RWMutex
 }
 
 func main() {
-	var cfg Config
+	var cfg config.Config
 
-	flag.IntVar(&cfg.port, "port", 6379, "Port number to expose the server to")
+	flag.IntVar(&cfg.Port, "port", 6379, "Port number to expose the server to")
 	replicaOf := flag.String("replicaof", "", "Specify the master host and port in format: <MASTER_HOST> <MASTER_PORT>")
 
 	flag.Parse()
@@ -62,12 +42,10 @@ func main() {
 	app := &App{
 		isMaster: *replicaOf == "",
 		cfg:      cfg,
-		handlers: Handlers,
-		store:    make(map[string]StoreVal),
-		replicas: make(map[string]Replica),
-		commands: make(chan Command),
+		store:    store.NewStore(),
+		replicas: make(map[string]replica.Replica),
 
-		mut: sync.Mutex{},
+		mut: sync.RWMutex{},
 	}
 
 	if !app.isMaster {
@@ -78,34 +56,39 @@ func main() {
 					fmt.Println("not enough arguments for --replicaof: <MASTER_HOST> <MASTER_PORT>")
 					os.Exit(1)
 				}
-				app.cfg.masterHost = os.Args[ind+1]
+				app.cfg.MasterHost = os.Args[ind+1]
 				num, err := strconv.Atoi(os.Args[ind+2])
 				if err != nil {
 					fmt.Println(err)
 					os.Exit(1)
 				}
-				app.cfg.masterPort = num
+				app.cfg.MasterPort = num
 			}
 		}
 
 	}
 
-	app.cfg.masterReplId = RandString(40)
-	app.cfg.masterReplOffset = 0
+	app.cfg.MasterReplId = RandString(40)
+	app.cfg.MasterReplOffset = 0
 
 	if !app.isMaster {
-		connectToMaster(app)
+		conn, err := replica.ConnectToMaster(app.cfg)
+		if err != nil && conn == nil {
+			fmt.Println("error connecting to master: ", err)
+			os.Exit(1)
+		}
+
+		go handleConnection(conn, app, true)
 	}
 
-	connStr := fmt.Sprintf("0.0.0.0:%v", cfg.port)
+	connStr := fmt.Sprintf("0.0.0.0:%v", cfg.Port)
+
 	listener, err := net.Listen("tcp", connStr)
 	defer listener.Close()
 	if err != nil {
-		fmt.Println("Failed to bind to port: ", cfg.port)
+		fmt.Println("Failed to bind to port: ", cfg.Port)
 		os.Exit(1)
 	}
-
-	go app.handleCommands()
 
 	for {
 		conn, err := listener.Accept()
@@ -114,12 +97,12 @@ func main() {
 			continue
 		}
 
-		go handleConnection(conn, app)
+		go handleConnection(conn, app, false)
 	}
 
 }
 
-func handleConnection(conn net.Conn, app *App) {
+func handleConnection(conn net.Conn, app *App, fromMaster bool) {
 	defer conn.Close()
 
 	respReader := resp.NewRes(conn)
@@ -140,282 +123,18 @@ func handleConnection(conn net.Conn, app *App) {
 				return
 			}
 
-			command := strings.ToLower(string(arr[0].Bulk_str))
+			responses := handlers.Handler(respVal, conn, app.replicas, app.store, app.cfg, &app.mut)
+
+			command := strings.ToUpper(arr[0].String())
 			args := arr[1:]
-			switch command {
-			case "echo":
-				response := app.echo(args)
-				respMarshaller.Write(response)
-			case "ping":
-				response := app.ping(args)
-				respMarshaller.Write(response)
-			case "set":
-				app.commands <- Command{
-					command:    "set",
-					args:       arr,
-					marshaller: *respMarshaller,
-				}
 
-			case "get":
-				app.commands <- Command{
-					command:    "get",
-					args:       arr,
-					marshaller: *respMarshaller,
-				}
-			case "info":
-				response := app.info(args)
-				respMarshaller.Write(response)
-			case "replconf":
-				if len(args) < 2 {
-					respMarshaller.Write(resp.Value{
-						Typ:        resp.SIMPLE_ERROR,
-						Simple_err: []byte("insufficient arguments"),
-					})
-				}
-
-				if string(args[0].Bulk_str) == "listening-port" {
-					portStr := string(args[1].Bulk_str)
-					port, err := strconv.Atoi(portStr)
-					if err != nil {
-						fmt.Println("error converting replconf listening_port to integer", err)
-						continue
-					}
-
-					remoteAddr := conn.RemoteAddr().String()
-
-					replica := Replica{
-						listeningPort: port,
-					}
-
-					app.mut.Lock()
-					app.replicas[remoteAddr] = replica
-					app.mut.Unlock()
-				}
-
-				if string(args[0].Bulk_str) == "capa" {
-					capability := string(args[1].Bulk_str)
-					app.mut.Lock()
-					replica := app.replicas[conn.RemoteAddr().String()]
-					app.mut.Unlock()
-					replica.capabilities = append(replica.capabilities, capability)
-				}
-
-				respMarshaller.Write(resp.Value{
-					Typ:        resp.SIMPLE_STRING,
-					Simple_str: []byte("OK"),
-				})
-			case "psync":
-				response := app.psync(args)
-				respMarshaller.Write(response)
-
-				// send empty rdb
-				response = app.emptyRdb(args)
-				err := respMarshaller.Write(response)
-				if err != nil {
-					fmt.Println("Error sending empty RDB file to replica")
-					continue
-				}
-
-				remoteAddr := conn.RemoteAddr().String()
-
-				app.mut.Lock()
-				replica := app.replicas[remoteAddr]
-				replica.acceptedRDB = true
-				replica.conn = conn
-				app.replicas[remoteAddr] = replica
-				app.mut.Unlock()
-			default:
-				return
-			}
-		} else {
-		}
-
-	}
-
-}
-
-func connectToMaster(app *App) {
-	connStr := fmt.Sprintf("%s:%v", app.cfg.masterHost, app.cfg.masterPort)
-	conn, err := net.Dial("tcp", connStr)
-	if err != nil {
-		fmt.Println("Failed to connect to master: ", connStr)
-		os.Exit(1)
-	}
-
-	respReader := resp.NewRes(conn)
-	respMarshaller := resp.NewWriter(conn)
-
-	// handshake 1/3
-	err = respMarshaller.Write(resp.Value{
-		Typ: resp.ARRAY,
-		Array: []resp.Value{
-			{
-				Typ:      resp.BULK_STRING,
-				Bulk_str: []byte("ping"),
-			},
-		},
-	})
-
-	if err != nil {
-		fmt.Println("handshake (1/3): ", err)
-		os.Exit(1)
-	}
-
-	responseVal, err := respReader.Read()
-	if err != nil {
-		fmt.Println("handshake (1/3): ", err)
-		os.Exit(1)
-	}
-
-	if responseVal.Typ != resp.SIMPLE_STRING && strings.ToLower(string(responseVal.Simple_str)) != "ok" {
-		fmt.Println("handshake (1/3): didn't recieve OK from master")
-		os.Exit(1)
-	}
-
-	// handshake 2/3
-	err = respMarshaller.Write(
-		resp.Value{
-			Typ: resp.ARRAY,
-			Array: []resp.Value{
-				{
-					Typ:      resp.BULK_STRING,
-					Bulk_str: []byte("REPLCONF"),
-				},
-				{
-					Typ:      resp.BULK_STRING,
-					Bulk_str: []byte("listening-port"),
-				},
-				{
-					Typ:      resp.BULK_STRING,
-					Bulk_str: []byte(fmt.Sprintf("%d", app.cfg.port)),
-				},
-			},
-		})
-
-	if err != nil {
-		fmt.Println("handshake (2/3): ", err)
-		os.Exit(1)
-	}
-
-	responseVal, err = respReader.Read()
-	if err != nil {
-		fmt.Println("handshake (2/3): ", err)
-		os.Exit(1)
-	}
-
-	err = respMarshaller.Write(
-		resp.Value{
-			Typ: resp.ARRAY,
-			Array: []resp.Value{
-				{
-					Typ:      resp.BULK_STRING,
-					Bulk_str: []byte("REPLCONF"),
-				},
-				{
-					Typ:      resp.BULK_STRING,
-					Bulk_str: []byte("capa"),
-				},
-				{
-					Typ:      resp.BULK_STRING,
-					Bulk_str: []byte("psync2"),
-				},
-			},
-		})
-
-	if err != nil {
-		fmt.Println("handshake (2/3): ", err)
-		os.Exit(1)
-	}
-
-	responseVal, err = respReader.Read()
-	if err != nil {
-		fmt.Println("handshake (2/3): ", err)
-		os.Exit(1)
-	}
-
-	if responseVal.Typ != resp.SIMPLE_STRING && strings.ToLower(string(responseVal.Simple_str)) != "ok" {
-		fmt.Println("handshake (2/3): didn't recieve OK from master")
-		os.Exit(1)
-	}
-
-	// handshake 3/3
-	err = respMarshaller.Write(
-		resp.Value{
-			Typ: resp.ARRAY,
-			Array: []resp.Value{
-				{
-					Typ:      resp.BULK_STRING,
-					Bulk_str: []byte("PSYNC"),
-				},
-				{
-					Typ:      resp.BULK_STRING,
-					Bulk_str: []byte("?"),
-				},
-				{
-					Typ:      resp.BULK_STRING,
-					Bulk_str: []byte("-1"),
-				},
-			},
-		})
-
-	if err != nil {
-		fmt.Println("handshake (3/3) couldn't write to master: ", err)
-		os.Exit(1)
-	}
-
-	// read the rdb file sent from master
-	responseVal, err = respReader.Read()
-	if err != nil {
-		fmt.Println("handshake(3/3) error recieving RDB file from master: error ", err)
-		os.Exit(1)
-	}
-
-	go handleConnection(conn, app)
-}
-
-func (app *App) propogate(response resp.Value) error {
-	var err error
-
-	for _, repl := range app.replicas {
-		if repl.conn == nil {
-			continue
-		}
-		go func(conn net.Conn) {
-			respWriter := resp.NewWriter(conn)
-			err = respWriter.Write(response)
-
-		}(repl.conn)
-	}
-
-	return err
-}
-
-func (app *App) handleCommands() {
-	for command := range app.commands {
-		marshaller := command.marshaller
-
-		switch command.command {
-		case "get":
-			respVal := app.get(command.args[1:])
-			marshaller.Write(respVal)
-		case "set":
-			respVal := app.set(command.args[1:])
-			marshaller.Write(respVal)
-
-			if app.isMaster && len(app.replicas) > 0 {
-
-				err := app.propogate(resp.Value{
-					Typ:   resp.ARRAY,
-					Array: command.args,
-				})
-
-				if err != nil {
-					fmt.Println("failed to propogate to all replicas")
-					fmt.Println(err)
+			// if slave connection to master, only respond to REPLCONF GETACK
+			if !fromMaster || (command == handlers.REPLCONF && len(args) > 1 && args[0].String() == handlers.GETACK) {
+				for _, response := range responses {
+					respMarshaller.Write(response)
 				}
 			}
-		default:
-
 		}
 	}
+
 }

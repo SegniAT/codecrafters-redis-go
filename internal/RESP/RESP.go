@@ -68,6 +68,40 @@ type Value struct {
 	Boolean      bool
 }
 
+func (v Value) String() string {
+	switch v.Typ {
+	case SIMPLE_STRING:
+		return string(v.Simple_str)
+	case SIMPLE_ERROR:
+		return string(v.Simple_err)
+	case INTEGER:
+		return fmt.Sprintf("%d", v.Integer)
+	case BULK_STRING:
+		return string(v.Bulk_str)
+	case ARRAY:
+		ln := len(v.Array)
+		arr := "[ "
+		for ind, el := range v.Array {
+			arr += el.String()
+			if ind != ln-1 {
+				arr += ", "
+			}
+		}
+		arr += " ]"
+		return arr
+	case NULL:
+		return ""
+	case BOOLEAN:
+		if v.Boolean {
+			return "true"
+		} else {
+			return "false"
+		}
+	default:
+		return "no string value"
+	}
+}
+
 type Resp struct {
 	reader *bufio.Reader
 }
@@ -196,8 +230,27 @@ func (r *Resp) readBulkString() (Value, error) {
 
 	_, _, err = r.readLine()
 	if err != nil {
+		fmt.Println("bulk: ", string(bulk))
 		return v, err
 	}
+
+	return v, nil
+}
+
+// $<length>\r\n<data>\r\n
+func (r *Resp) ReadRDB() (Value, error) {
+	v := Value{Typ: BULK_STRING}
+
+	len, _, err := r.readInteger()
+	if err != nil {
+		return v, err
+	}
+
+	bulk := make([]byte, len)
+
+	r.reader.Read(bulk)
+
+	v.Bulk_str = bulk
 
 	return v, nil
 }
@@ -267,7 +320,7 @@ func (v Value) Marshal() []byte {
 	case BULK_STRING:
 		return v.marshalBulkString()
 	case ARRAY:
-		return v.marshalArray()
+		return v.MarshalArray()
 	case NULL:
 		v.marshalNull()
 	case BOOLEAN:
@@ -338,7 +391,7 @@ func (v Value) marshalBulkString() []byte {
 }
 
 // *<number-of-elements>\r\n<element-1>...<element-n>
-func (v Value) marshalArray() []byte {
+func (v Value) MarshalArray() []byte {
 	length := len(v.Array)
 	var bytes []byte
 	bytes = append(bytes, byte(ARRAY))
