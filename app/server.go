@@ -38,7 +38,6 @@ func main() {
 	replicaOf := flag.String("replicaof", "", "Specify the master host and port in format: <MASTER_HOST> <MASTER_PORT>")
 
 	flag.Parse()
-
 	app := &App{
 		isMaster: *replicaOf == "",
 		cfg:      cfg,
