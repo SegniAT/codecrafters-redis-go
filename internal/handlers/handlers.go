@@ -250,6 +250,7 @@ func EmptyRdb(_ []resp.Value) resp.Value {
 }
 
 func replConf(args []resp.Value, conn net.Conn, replicas map[string]replica.Replica, mut *sync.RWMutex) resp.Value {
+	fmt.Println("replconf: arg[0] ", args[0].String())
 	if len(args) < 2 {
 		return resp.Value{
 			Typ:        resp.SIMPLE_ERROR,

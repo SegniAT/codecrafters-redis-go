@@ -127,6 +127,7 @@ func handleConnection(conn net.Conn, app *App, fromMaster bool) {
 
 			command := strings.ToUpper(arr[0].String())
 			args := arr[1:]
+			fmt.Println("command: ", respVal.String())
 
 			// if slave connection to master, only respond to REPLCONF GETACK
 			if !fromMaster || (command == handlers.REPLCONF && len(args) > 1 && args[0].String() == handlers.GETACK) {
