@@ -121,7 +121,6 @@ func handleConnection(conn net.Conn, app *App, fromMaster bool) {
 			if len(arr) < 1 {
 				return
 			}
-
 			responses := handlers.Handler(respVal, conn, app.replicas, app.store, app.cfg, &app.mut)
 
 			command := strings.ToUpper(arr[0].String())
