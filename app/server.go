@@ -91,12 +91,12 @@ func main() {
 			continue
 		}
 
-		go handleConnection(conn, app, false)
+		go handleConnection(conn, app)
 	}
 
 }
 
-func handleConnection(conn net.Conn, app *App, fromMaster bool) {
+func handleConnection(conn net.Conn, app *App) {
 	defer conn.Close()
 
 	respReader := resp.NewRes(conn)
@@ -121,22 +121,10 @@ func handleConnection(conn net.Conn, app *App, fromMaster bool) {
 				return
 			}
 
-			if !fromMaster {
-				responses := handlers.ClientHandler(respVal, conn, app.replicas, app.store, app.cfg, &app.mut)
+			responses := handlers.ClientHandler(respVal, conn, app.replicas, app.store, &app.cfg, &app.mut)
 
-				for _, response := range responses {
-					respMarshaller.Write(response)
-				}
-			} else {
-				responses, err := handlers.MasterReplicaConnHandler(respVal, conn, app.replicas, app.store, app.cfg, &app.mut)
-				if err != nil {
-					fmt.Println("Error MasterReplicaConnHandler: ", err)
-					continue
-				}
-
-				for _, response := range responses {
-					respMarshaller.Write(response)
-				}
+			for _, response := range responses {
+				respMarshaller.Write(response)
 			}
 
 		}
@@ -297,6 +285,7 @@ func (app *App) ConnectToMaster() {
 
 	for {
 		responseVal, err = respReader.Read()
+		fmt.Println("handle master-replica connection: (command) ", responseVal.String())
 
 		if errors.Is(err, io.EOF) {
 			fmt.Println("CONNECTION CLOSED: EOF")
@@ -307,7 +296,7 @@ func (app *App) ConnectToMaster() {
 			break
 		}
 
-		responses, err := handlers.MasterReplicaConnHandler(responseVal, conn, app.replicas, app.store, app.cfg, &app.mut)
+		responses, err := handlers.MasterReplicaConnHandler(responseVal, app.replicas, app.store, &app.cfg, &app.mut)
 		if err != nil {
 			fmt.Println("MasterReplicaHandler: ", err)
 		}

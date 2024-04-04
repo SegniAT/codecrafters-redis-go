@@ -35,10 +35,12 @@ const (
 	GETACK         = "GETACK"
 )
 
-func ClientHandler(respVal resp.Value, conn net.Conn, replicas map[string]replica.Replica, store *store.Store, cfg config.Config, replicasMut *sync.RWMutex) []resp.Value {
+func ClientHandler(respVal resp.Value, conn net.Conn, replicas map[string]replica.Replica, store *store.Store, cfg *config.Config, replicasMut *sync.RWMutex) []resp.Value {
 	arr := respVal.Array
 	command := strings.ToUpper(arr[0].String())
 	args := arr[1:]
+
+	fmt.Println("Master-Replica command: ", respVal.String())
 
 	var response []resp.Value
 	switch command {
@@ -59,9 +61,9 @@ func ClientHandler(respVal resp.Value, conn net.Conn, replicas map[string]replic
 	case GET:
 		response = append(response, get(args, store))
 	case INFO:
-		response = append(response, info(args, cfg))
+		response = append(response, info(args, *cfg))
 	case PSYNC:
-		response = append(response, psync(args, cfg))
+		response = append(response, psync(args, *cfg))
 
 		// send empty rdb
 		emptyRdb := EmptyRdb()
@@ -87,17 +89,20 @@ func ClientHandler(respVal resp.Value, conn net.Conn, replicas map[string]replic
 	return response
 }
 
-func MasterReplicaConnHandler(respVal resp.Value, conn net.Conn, replicas map[string]replica.Replica, store *store.Store, cfg config.Config, replicasMut *sync.RWMutex) ([]resp.Value, error) {
+func MasterReplicaConnHandler(respVal resp.Value, replicas map[string]replica.Replica, store *store.Store, cfg *config.Config, replicasMut *sync.RWMutex) ([]resp.Value, error) {
 	arr := respVal.Array
 	command := strings.ToUpper(arr[0].String())
 	args := arr[1:]
 
 	var response []resp.Value
 	switch command {
+	case PING:
+		ping(args)
 	case SET:
 		set(args, store)
 	case REPLCONF:
 		arg1 := strings.ToUpper(args[0].String())
+		masterReplicaOffset := strconv.Itoa(cfg.MasterReplOffset)
 
 		if arg1 == GETACK {
 			resp := resp.Value{
@@ -113,7 +118,7 @@ func MasterReplicaConnHandler(respVal resp.Value, conn net.Conn, replicas map[st
 					},
 					{
 						Typ:      resp.BULK_STRING,
-						Bulk_str: []byte("0"),
+						Bulk_str: []byte(masterReplicaOffset),
 					},
 				},
 			}
@@ -125,6 +130,9 @@ func MasterReplicaConnHandler(respVal resp.Value, conn net.Conn, replicas map[st
 		return response, fmt.Errorf("Unknown command sent from master to replica")
 
 	}
+
+	rawBytes := respVal.Marshal()
+	cfg.MasterReplOffset += len(rawBytes)
 
 	return response, nil
 }

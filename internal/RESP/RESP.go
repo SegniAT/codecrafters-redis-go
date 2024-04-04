@@ -376,7 +376,6 @@ func (v Value) marshalInteger() []byte {
 
 // $<length>\r\n<data>\r\n
 func (v Value) marshalBulkString() []byte {
-
 	// $-1\r\n
 	var bytes []byte
 	if v.Bulk_str_err {
