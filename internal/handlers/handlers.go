@@ -80,7 +80,7 @@ func ClientHandler(respVal resp.Value, conn net.Conn, replicas map[string]replic
 	case REPLCONF:
 		response = append(response, replConf(args, conn, replicas, replicasMut))
 	case WAIT:
-		response = append(response, wait())
+		response = append(response, wait(replicas))
 	default:
 		response = append(response, resp.Value{
 			Typ:        resp.SIMPLE_ERROR,
@@ -362,10 +362,10 @@ func replConf(args []resp.Value, conn net.Conn, replicas map[string]replica.Repl
 
 }
 
-func wait() resp.Value {
+func wait(replicas map[string]replica.Replica) resp.Value {
 	return resp.Value{
 		Typ:     resp.INTEGER,
-		Integer: 0,
+		Integer: int64(len(replicas)),
 	}
 }
 
