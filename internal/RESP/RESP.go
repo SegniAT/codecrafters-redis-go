@@ -230,16 +230,18 @@ func (r *Resp) readBulkString() (Value, error) {
 
 	_, _, err = r.readLine()
 	if err != nil {
-		fmt.Println("bulk: ", string(bulk))
 		return v, err
 	}
 
 	return v, nil
 }
 
-// $<length>\r\n<data>\r\n
+// $<length>\r\n<data>
 func (r *Resp) ReadRDB() (Value, error) {
-	v := Value{Typ: BULK_STRING}
+	v := Value{Typ: BULK_STRING, Bulk_str_rdb: true}
+
+	// read the first byte - $
+	r.reader.ReadByte()
 
 	len, _, err := r.readInteger()
 	if err != nil {
@@ -247,8 +249,14 @@ func (r *Resp) ReadRDB() (Value, error) {
 	}
 
 	bulk := make([]byte, len)
+	readBytes, err := r.reader.Read(bulk)
+	if err != nil {
+		return v, err
+	}
 
-	r.reader.Read(bulk)
+	if len != readBytes {
+		return v, fmt.Errorf("mismatch: expected to read %d bytes, got %d", len, readBytes)
+	}
 
 	v.Bulk_str = bulk
 

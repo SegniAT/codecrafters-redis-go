@@ -35,7 +35,7 @@ const (
 	GETACK         = "GETACK"
 )
 
-func Handler(respVal resp.Value, conn net.Conn, replicas map[string]replica.Replica, store *store.Store, cfg config.Config, replicasMut *sync.RWMutex) []resp.Value {
+func ClientHandler(respVal resp.Value, conn net.Conn, replicas map[string]replica.Replica, store *store.Store, cfg config.Config, replicasMut *sync.RWMutex) []resp.Value {
 	arr := respVal.Array
 	command := strings.ToUpper(arr[0].String())
 	args := arr[1:]
@@ -64,7 +64,9 @@ func Handler(respVal resp.Value, conn net.Conn, replicas map[string]replica.Repl
 		response = append(response, psync(args, cfg))
 
 		// send empty rdb
-		response = append(response, EmptyRdb(args))
+		emptyRdb := EmptyRdb()
+		response = append(response, emptyRdb)
+
 		remoteAddr := conn.RemoteAddr().String()
 		replicasMut.Lock()
 		replica := replicas[remoteAddr]
@@ -83,6 +85,48 @@ func Handler(respVal resp.Value, conn net.Conn, replicas map[string]replica.Repl
 	}
 
 	return response
+}
+
+func MasterReplicaConnHandler(respVal resp.Value, conn net.Conn, replicas map[string]replica.Replica, store *store.Store, cfg config.Config, replicasMut *sync.RWMutex) ([]resp.Value, error) {
+	arr := respVal.Array
+	command := strings.ToUpper(arr[0].String())
+	args := arr[1:]
+
+	var response []resp.Value
+	switch command {
+	case SET:
+		set(args, store)
+	case REPLCONF:
+		arg1 := strings.ToUpper(args[0].String())
+
+		if arg1 == GETACK {
+			resp := resp.Value{
+				Typ: resp.ARRAY,
+				Array: []resp.Value{
+					{
+						Typ:      resp.BULK_STRING,
+						Bulk_str: []byte("REPLCONF"),
+					},
+					{
+						Typ:      resp.BULK_STRING,
+						Bulk_str: []byte("ACK"),
+					},
+					{
+						Typ:      resp.BULK_STRING,
+						Bulk_str: []byte("0"),
+					},
+				},
+			}
+			response = append(response, resp)
+		} else {
+			return response, fmt.Errorf("Unknown REPLCONF parameter sent from master to replica")
+		}
+	default:
+		return response, fmt.Errorf("Unknown command sent from master to replica")
+
+	}
+
+	return response, nil
 }
 
 func ping(args []resp.Value) resp.Value {
@@ -233,7 +277,7 @@ func psync(args []resp.Value, cfg config.Config) resp.Value {
 	return resp.Value{}
 }
 
-func EmptyRdb(_ []resp.Value) resp.Value {
+func EmptyRdb() resp.Value {
 	emptyRdbHex := "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2"
 	binaryData, err := hex.DecodeString(emptyRdbHex)
 	if err != nil {
@@ -250,7 +294,6 @@ func EmptyRdb(_ []resp.Value) resp.Value {
 }
 
 func replConf(args []resp.Value, conn net.Conn, replicas map[string]replica.Replica, mut *sync.RWMutex) resp.Value {
-	fmt.Println("replconf: arg[0] ", args[0].String())
 	if len(args) < 2 {
 		return resp.Value{
 			Typ:        resp.SIMPLE_ERROR,
@@ -299,24 +342,6 @@ func replConf(args []resp.Value, conn net.Conn, replicas map[string]replica.Repl
 			Typ:        resp.SIMPLE_STRING,
 			Simple_str: []byte("OK"),
 		}
-	case GETACK:
-		return resp.Value{
-			Typ: resp.ARRAY,
-			Array: []resp.Value{
-				{
-					Typ:      resp.BULK_STRING,
-					Bulk_str: []byte("REPLCONF"),
-				},
-				{
-					Typ:      resp.BULK_STRING,
-					Bulk_str: []byte("ACK"),
-				},
-				{
-					Typ:      resp.BULK_STRING,
-					Bulk_str: []byte("0"),
-				},
-			},
-		}
 	default:
 		return resp.Value{
 			Typ:        resp.SIMPLE_ERROR,
@@ -330,18 +355,18 @@ func propogate(response resp.Value, replicas map[string]replica.Replica) error {
 	var err error
 	var wg sync.WaitGroup
 
+	wg.Add(len(replicas))
 	for _, repl := range replicas {
 		if repl.Conn == nil {
 			continue
 		}
 		go func(conn net.Conn) {
-			wg.Add(1)
 			defer wg.Done()
 			respWriter := resp.NewWriter(conn)
 			err = respWriter.Write(response)
 		}(repl.Conn)
-		wg.Wait()
 	}
+	wg.Wait()
 
 	return err
 }
