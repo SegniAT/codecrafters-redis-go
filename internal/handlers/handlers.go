@@ -33,6 +33,7 @@ const (
 	FULLRESYNC     = "FULLRESYNC"
 	ACK            = "ACK"
 	GETACK         = "GETACK"
+	WAIT           = "WAIT"
 )
 
 func ClientHandler(respVal resp.Value, conn net.Conn, replicas map[string]replica.Replica, store *store.Store, cfg *config.Config, replicasMut *sync.RWMutex) []resp.Value {
@@ -78,6 +79,8 @@ func ClientHandler(respVal resp.Value, conn net.Conn, replicas map[string]replic
 		replicasMut.Unlock()
 	case REPLCONF:
 		response = append(response, replConf(args, conn, replicas, replicasMut))
+	case WAIT:
+		response = append(response, wait())
 	default:
 		response = append(response, resp.Value{
 			Typ:        resp.SIMPLE_ERROR,
@@ -357,6 +360,13 @@ func replConf(args []resp.Value, conn net.Conn, replicas map[string]replica.Repl
 		}
 	}
 
+}
+
+func wait() resp.Value {
+	return resp.Value{
+		Typ:     resp.INTEGER,
+		Integer: 0,
+	}
 }
 
 func propogate(response resp.Value, replicas map[string]replica.Replica) error {
