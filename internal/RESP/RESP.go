@@ -442,13 +442,13 @@ func NewWriter(w io.Writer) *Writer {
 	return &Writer{writer: w}
 }
 
-func (w *Writer) Write(v Value) error {
+func (w *Writer) Write(v Value) (int, error) {
 	var bytes = v.Marshal()
 
-	_, err := w.writer.Write(bytes)
+	bytesWritten, err := w.writer.Write(bytes)
 	if err != nil {
-		return err
+		return bytesWritten, err
 	}
 
-	return nil
+	return bytesWritten, nil
 }

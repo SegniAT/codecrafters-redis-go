@@ -9,4 +9,5 @@ type Replica struct {
 	Conn          net.Conn
 	Capabilities  []string
 	AcceptedRDB   bool
+	Offset        int
 }

@@ -25,6 +25,7 @@ const (
 	INFO     = "INFO"
 	PSYNC    = "PSYNC"
 	REPLCONF = "REPLCONF"
+	WAIT     = "WAIT"
 
 	PX             = "PX"
 	REPLICATION    = "REPLICATION"
@@ -33,32 +34,37 @@ const (
 	FULLRESYNC     = "FULLRESYNC"
 	ACK            = "ACK"
 	GETACK         = "GETACK"
-	WAIT           = "WAIT"
 )
 
-func ClientHandler(respVal resp.Value, conn net.Conn, replicas map[string]replica.Replica, store *store.Store, cfg *config.Config, replicasMut *sync.RWMutex) []resp.Value {
+func ClientHandler(respVal resp.Value, conn net.Conn, replicas *map[string]*replica.Replica, store *store.Store, cfg *config.Config, replicasMut *sync.RWMutex, ackRecieved *chan bool) ([]*resp.Value, error) {
 	arr := respVal.Array
 	command := strings.ToUpper(arr[0].String())
 	args := arr[1:]
 
-	fmt.Println("Master-Replica command: ", respVal.String())
+	fmt.Println("\n▶️ main handler: ", respVal.String())
 
-	var response []resp.Value
+	var response []*resp.Value
 	switch command {
 	case PING:
 		response = append(response, ping(args))
 	case ECHO:
 		response = append(response, echo(args))
 	case SET:
-		response = append(response, set(args, store))
-		err := propogate(respVal, replicas)
-		if err != nil {
-			response = append(response, resp.Value{
-				Typ:        resp.SIMPLE_ERROR,
-				Simple_str: []byte("error propogating 'SET' command"),
-			})
-			fmt.Println("error propogating 'SET' command", err)
+		setResponse := set(args, store)
+		response = append(response, setResponse)
+		if strings.ToUpper(setResponse.String()) == "OK" {
+			length := 0
+			for _, r := range arr {
+				length += len(r.Bulk_str)
+			}
+			cfg.MasterReplOffset += length
 		}
+		err := replicate(respVal, replicas)
+
+		if err != nil {
+			return response, fmt.Errorf("error replicating 'SET' command: %v", err)
+		}
+		fmt.Println("✅'SET' replicated successfully")
 	case GET:
 		response = append(response, get(args, store))
 	case INFO:
@@ -72,30 +78,31 @@ func ClientHandler(respVal resp.Value, conn net.Conn, replicas map[string]replic
 
 		remoteAddr := conn.RemoteAddr().String()
 		replicasMut.Lock()
-		replica := replicas[remoteAddr]
-		replica.AcceptedRDB = true
-		replica.Conn = conn
-		replicas[remoteAddr] = replica
+		(*replicas)[remoteAddr].AcceptedRDB = true
+		(*replicas)[remoteAddr].Conn = conn
 		replicasMut.Unlock()
 	case REPLCONF:
-		response = append(response, replConf(args, conn, replicas, replicasMut))
+		res := replConf(args, conn, replicas, replicasMut, ackRecieved)
+		response = append(response, res)
 	case WAIT:
-		response = append(response, wait(replicas))
+		response = append(response, wait(args, replicas, cfg, ackRecieved))
 	default:
-		response = append(response, resp.Value{
+		response = append(response, &resp.Value{
 			Typ:        resp.SIMPLE_ERROR,
-			Simple_err: []byte("unknown command"),
+			Simple_err: []byte("Unknown command sent from client"),
 		})
-
+		return response, fmt.Errorf("Unknown command sent from client")
 	}
 
-	return response
+	return response, nil
 }
 
-func MasterReplicaConnHandler(respVal resp.Value, replicas map[string]replica.Replica, store *store.Store, cfg *config.Config, replicasMut *sync.RWMutex) ([]resp.Value, error) {
+func MasterReplicaConnHandler(respVal resp.Value, replicas *map[string]*replica.Replica, store *store.Store, cfg *config.Config, replicasMut *sync.RWMutex) ([]resp.Value, error) {
 	arr := respVal.Array
 	command := strings.ToUpper(arr[0].String())
 	args := arr[1:]
+
+	fmt.Println("\nmaster 🔁 replica handler: ", respVal.String())
 
 	var response []resp.Value
 	switch command {
@@ -130,8 +137,11 @@ func MasterReplicaConnHandler(respVal resp.Value, replicas map[string]replica.Re
 			return response, fmt.Errorf("Unknown REPLCONF parameter sent from master to replica")
 		}
 	default:
+		response = append(response, resp.Value{
+			Typ:        resp.SIMPLE_ERROR,
+			Simple_err: []byte("Unknown command sent from master to replica"),
+		})
 		return response, fmt.Errorf("Unknown command sent from master to replica")
-
 	}
 
 	rawBytes := respVal.Marshal()
@@ -140,31 +150,31 @@ func MasterReplicaConnHandler(respVal resp.Value, replicas map[string]replica.Re
 	return response, nil
 }
 
-func ping(args []resp.Value) resp.Value {
+func ping(args []resp.Value) *resp.Value {
 	if len(args) == 0 {
-		return resp.Value{Typ: resp.SIMPLE_STRING, Simple_str: []byte("PONG")}
+		return &resp.Value{Typ: resp.SIMPLE_STRING, Simple_str: []byte("PONG")}
 	}
 
-	return resp.Value{Typ: resp.BULK_STRING, Bulk_str: args[0].Bulk_str}
+	return &resp.Value{Typ: resp.BULK_STRING, Bulk_str: args[0].Bulk_str}
 }
 
-func echo(args []resp.Value) resp.Value {
+func echo(args []resp.Value) *resp.Value {
 	if len(args) == 0 {
-		return resp.Value{
+		return &resp.Value{
 			Typ:          resp.BULK_STRING,
 			Bulk_str_err: true,
 		}
 	}
 
-	return resp.Value{
+	return &resp.Value{
 		Typ:      resp.BULK_STRING,
 		Bulk_str: args[0].Bulk_str,
 	}
 }
 
-func set(args []resp.Value, s *store.Store) resp.Value {
+func set(args []resp.Value, s *store.Store) *resp.Value {
 	if len(args) < 2 {
-		return resp.Value{
+		return &resp.Value{
 			Typ:        resp.SIMPLE_ERROR,
 			Simple_err: []byte("wrong number of arguments"),
 		}
@@ -182,7 +192,7 @@ func set(args []resp.Value, s *store.Store) resp.Value {
 			expiry, err := time.ParseDuration(args[3].String() + "ms")
 			fmt.Println("expiry ms: ", expiry.Milliseconds())
 			if err != nil {
-				return resp.Value{
+				return &resp.Value{
 					Typ:        resp.SIMPLE_ERROR,
 					Simple_err: []byte("error trying to read expiry"),
 				}
@@ -195,15 +205,15 @@ func set(args []resp.Value, s *store.Store) resp.Value {
 
 	s.Set(key, &val)
 
-	return resp.Value{
+	return &resp.Value{
 		Typ:        resp.SIMPLE_STRING,
 		Simple_str: []byte("OK"),
 	}
 }
 
-func get(args []resp.Value, s *store.Store) resp.Value {
+func get(args []resp.Value, s *store.Store) *resp.Value {
 	if len(args) == 0 {
-		return resp.Value{
+		return &resp.Value{
 			Typ:        resp.SIMPLE_ERROR,
 			Simple_err: []byte("wrong number of arguments"),
 		}
@@ -214,28 +224,28 @@ func get(args []resp.Value, s *store.Store) resp.Value {
 	val, ok := s.Get(key)
 
 	if !ok {
-		return resp.Value{
+		return &resp.Value{
 			Typ:  resp.NULL,
 			Null: true,
 		}
 	}
 
 	if val.ExpiresAfter != 0 && time.Since(val.StoredAt).Milliseconds() > val.ExpiresAfter.Milliseconds() {
-		return resp.Value{
+		return &resp.Value{
 			Typ:          resp.BULK_STRING,
 			Bulk_str_err: true,
 		}
 	}
 
-	return resp.Value{
+	return &resp.Value{
 		Typ:      resp.BULK_STRING,
 		Bulk_str: []byte(val.Val),
 	}
 }
 
-func info(args []resp.Value, cfg config.Config) resp.Value {
+func info(args []resp.Value, cfg config.Config) *resp.Value {
 	if len(args) == 0 {
-		return resp.Value{
+		return &resp.Value{
 			Typ: resp.BULK_STRING,
 		}
 	}
@@ -257,56 +267,56 @@ func info(args []resp.Value, cfg config.Config) resp.Value {
 		bulkString += " " + masterReplIdStr
 		bulkString += " " + masterReplOffsetStr
 
-		return resp.Value{
+		return &resp.Value{
 			Typ:      resp.BULK_STRING,
 			Bulk_str: []byte(bulkString),
 		}
 
 	default:
-		return resp.Value{
+		return &resp.Value{
 			Typ: resp.BULK_STRING,
 		}
 	}
 
 }
 
-func psync(args []resp.Value, cfg config.Config) resp.Value {
+func psync(args []resp.Value, cfg config.Config) *resp.Value {
 	if len(args) < 2 {
-		return resp.Value{
+		return &resp.Value{
 			Typ:        resp.SIMPLE_ERROR,
 			Simple_err: []byte("not enough arguments for the command 'psync'"),
 		}
 	}
 
 	if args[0].String() == "?" && args[1].String() == "-1" {
-		return resp.Value{
+		return &resp.Value{
 			Typ:        resp.SIMPLE_STRING,
 			Simple_str: []byte(fmt.Sprintf("FULLRESYNC %s %d", cfg.MasterReplId, cfg.MasterReplOffset)),
 		}
 	}
 
-	return resp.Value{}
+	return nil
 }
 
-func EmptyRdb() resp.Value {
+func EmptyRdb() *resp.Value {
 	emptyRdbHex := "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2"
 	binaryData, err := hex.DecodeString(emptyRdbHex)
 	if err != nil {
 		fmt.Println("error decoding empty RDB hex value: ", emptyRdbHex)
 		fmt.Println(err)
-		return resp.Value{}
+		return nil
 	}
 
-	return resp.Value{
+	return &resp.Value{
 		Typ:          resp.BULK_STRING,
 		Bulk_str_rdb: true,
 		Bulk_str:     binaryData,
 	}
 }
 
-func replConf(args []resp.Value, conn net.Conn, replicas map[string]replica.Replica, mut *sync.RWMutex) resp.Value {
+func replConf(args []resp.Value, conn net.Conn, replicas *map[string]*replica.Replica, mut *sync.RWMutex, ackRecieved *chan bool) *resp.Value {
 	if len(args) < 2 {
-		return resp.Value{
+		return &resp.Value{
 			Typ:        resp.SIMPLE_ERROR,
 			Simple_err: []byte("insufficient arguments"),
 		}
@@ -322,7 +332,7 @@ func replConf(args []resp.Value, conn net.Conn, replicas map[string]replica.Repl
 		if err != nil {
 			fmt.Println("error converting replconf listening-port to integer", err)
 
-			return resp.Value{
+			return &resp.Value{
 				Typ:        resp.SIMPLE_ERROR,
 				Simple_err: []byte("invalid listening-port argument"),
 			}
@@ -330,59 +340,162 @@ func replConf(args []resp.Value, conn net.Conn, replicas map[string]replica.Repl
 
 		remoteAddr := conn.RemoteAddr().String()
 
-		replica := replica.Replica{
+		replica := &replica.Replica{
 			ListeningPort: port,
 		}
 
 		mut.Lock()
-		replicas[remoteAddr] = replica
+		(*replicas)[remoteAddr] = replica
 		mut.Unlock()
 
-		return resp.Value{
+		return &resp.Value{
 			Typ:        resp.SIMPLE_STRING,
 			Simple_str: []byte("OK"),
 		}
 	case CAPA:
 		capability := arg2
 		mut.Lock()
-		replica := replicas[conn.RemoteAddr().String()]
+		replica := (*replicas)[conn.RemoteAddr().String()]
 		mut.Unlock()
 		replica.Capabilities = append(replica.Capabilities, capability)
 
-		return resp.Value{
+		return &resp.Value{
 			Typ:        resp.SIMPLE_STRING,
 			Simple_str: []byte("OK"),
 		}
+	case ACK:
+		(*ackRecieved) <- true
+		return nil
 	default:
-		return resp.Value{
+		return &resp.Value{
 			Typ:        resp.SIMPLE_ERROR,
-			Simple_err: []byte("invalid argument for 'REPLCONF'"),
+			Simple_err: []byte("invalid argument for 'REPLCONF' command"),
 		}
 	}
 
 }
 
-func wait(replicas map[string]replica.Replica) resp.Value {
-	return resp.Value{
-		Typ:     resp.INTEGER,
-		Integer: int64(len(replicas)),
+func wait(args []resp.Value, replicas *map[string]*replica.Replica, _ *config.Config, ackRecieved *chan bool) *resp.Value {
+	if len(args) < 2 {
+		return &resp.Value{
+			Typ:        resp.SIMPLE_ERROR,
+			Simple_err: []byte("invalid number of arguments for 'WAIT' command"),
+		}
 	}
+
+	count, err := strconv.Atoi(args[0].String())
+	if err != nil {
+		return &resp.Value{
+			Typ:        resp.SIMPLE_ERROR,
+			Simple_err: []byte("invalid type of argument for 'WAIT' command"),
+		}
+	}
+
+	// ms
+	timeout, err := time.ParseDuration(args[1].String() + "ms")
+	if err != nil {
+		return &resp.Value{
+			Typ:        resp.SIMPLE_ERROR,
+			Simple_err: []byte("invalid type of argument for 'WAIT' command"),
+		}
+	}
+
+	getAckCommand := resp.Value{
+		Typ: resp.ARRAY,
+		Array: []resp.Value{
+			{
+				Typ:      resp.BULK_STRING,
+				Bulk_str: []byte("REPLCONF"),
+			},
+			{
+				Typ:      resp.BULK_STRING,
+				Bulk_str: []byte("GETACK"),
+			},
+			{
+				Typ:      resp.BULK_STRING,
+				Bulk_str: []byte("*"),
+			},
+		},
+	}
+
+	timer := time.After(timeout * time.Millisecond)
+
+	acks := 0
+
+	for key, repl := range *replicas {
+		if repl.Offset > 0 {
+			respReader := resp.NewRes(repl.Conn)
+			respMarshaller := resp.NewWriter(repl.Conn)
+
+			bytesWritten, err := respMarshaller.Write(getAckCommand)
+			if err != nil {
+				fmt.Println("error sending 'REPLCONF GETACK *' command to replica")
+				continue
+			}
+			repl.Offset += bytesWritten
+
+			fmt.Println("GETACK sent to: ", key)
+			go func(key string, repl *replica.Replica) {
+				fmt.Printf("wating for response from the replica %s for 'GETACK' command...\n", key)
+				_, err = respReader.Read()
+
+				if err != nil {
+					fmt.Println("error recieving response for 'GETACK' command from replica: ", key, err)
+				} else {
+					fmt.Println("got response for 'GETACK' command from replica: ", key)
+				}
+				(*ackRecieved) <- true
+			}(key, repl)
+		} else {
+			acks++
+		}
+	}
+
+outer:
+	for acks < count {
+		fmt.Println("(loop) acks: ", acks)
+		select {
+		case <-(*ackRecieved):
+			acks++
+			fmt.Println("ackRecieved: acks=", acks)
+		case <-timer:
+			fmt.Println("timeout: acks=", acks)
+			break outer
+		}
+	}
+
+	respAcks := resp.Value{
+		Typ:     resp.INTEGER,
+		Integer: int64(acks),
+	}
+	fmt.Println("returned acks: ", respAcks)
+
+	return &respAcks
 }
 
-func propogate(response resp.Value, replicas map[string]replica.Replica) error {
+func replicate(response resp.Value, replicas *map[string]*replica.Replica) error {
 	var err error
 	var wg sync.WaitGroup
 
-	wg.Add(len(replicas))
-	for _, repl := range replicas {
-		if repl.Conn == nil {
-			continue
-		}
-		go func(conn net.Conn) {
+	wg.Add(len(*replicas))
+	for key, repl := range *replicas {
+		go func(conn net.Conn, key string, repl *replica.Replica, replicas *map[string]*replica.Replica, err *error) {
 			defer wg.Done()
+			if repl.Conn == nil {
+				delete(*replicas, key)
+				return
+			}
 			respWriter := resp.NewWriter(conn)
-			err = respWriter.Write(response)
-		}(repl.Conn)
+			bytesWritten, respErr := respWriter.Write(response)
+			*err = respErr
+
+			if respErr != nil {
+				// remove stale replica
+				delete(*replicas, key)
+			} else {
+				repl.Offset += bytesWritten
+			}
+		}(repl.Conn, key, repl, replicas, &err)
 	}
 	wg.Wait()
 
